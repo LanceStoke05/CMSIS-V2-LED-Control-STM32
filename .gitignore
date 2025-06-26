@@ -1,0 +1,24 @@
+# STM32CubeIDE
+*.launch
+*.log
+*.bin
+*.elf
+*.hex
+*.map
+*.o
+*.d
+*.list
+*.out
+
+# Build folders
+build/
+Debug/
+Release/
+
+# IDE settings
+*.settings/
+.cproject
+.project
+
+# Backup files
+*~
