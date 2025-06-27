@@ -116,7 +116,7 @@ const osThreadAttr_t uartTask_attributes = {
 const osThreadAttr_t flashTask_attributes = {
   .name = "flashTask",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 
 
