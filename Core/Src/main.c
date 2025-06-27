@@ -31,7 +31,21 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct {
+	uint8_t size;
+	uint8_t payload[5];
+	uint8_t checksum;
+} UART_Message_t;
 
+
+typedef enum{
+	MODE_0,       // Mode = 0
+	MODE_1,       // Mode = 1
+	MODE_2,       // Mode = 2
+	QUERY_COUNT,  // Query for count
+	QUERY_MODE,   // Query for mode
+	COUNT_X       // Count = X
+} UART_Instruction_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -151,7 +165,7 @@ uint8_t count_nonzero_from_end(const uint8_t *data);
 void Button_ISR_func_c(void);
 void Button_ISR_func_m(void);
 void UART_Send(char *data, uint8_t size);
-uint8_t calculate_checksum(const uint8_t *data, size_t length, char uart_type);
+uint8_t calculate_checksum(const uint8_t *data, size_t length);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -557,113 +571,107 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-//Start funcs
 void Task_1_UART(void * arguments)
 {
-	uint8_t data_from_queue;
-	uint8_t data_from_queue_big[5];
-	uint32_t count_data;
-	uint8_t uart_flag;
-	uint8_t checksum;
-	debug_c = 0;
-	debug_q = 0;
-	debug_checksum = 0;
+	uint8_t check_start_byte = 0;
+	uint8_t checksum = 0;
+	uint8_t P_payload[4] = {0};
+	uint32_t P_count = 0;
 	for(;;)
-	{	count_data = 0;
-
-		for (uint8_t k = 0; k<5; k++){data_from_queue_big[k] = 0;}
-		if(HAL_UART_GetState(&huart3) != HAL_UART_STATE_BUSY_TX){
-		if(osMessageQueueGet(UART_QueueHandle, &data_from_queue, NULL, 10)==osOK){
-			debug_queue_output[debug_queue_counter] = data_from_queue;
-								debug_queue_counter ++;
-			if (data_from_queue == 'c')
+	{
+		uint32_t count_placeholder = 0;
+		UART_Message_t msg_struct = {0};
+		if(HAL_UART_GetState(&huart3) != HAL_UART_STATE_BUSY_TX)
+		{
+			if(osMessageQueueGet(UART_QueueHandle, &check_start_byte, NULL, 100)==osOK)
 			{
-				for (uint8_t i = 0; i < 4; i++)
+				if (check_start_byte == 0xAA)
 				{
-					if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[i], NULL, 10)==osOK)
+					if(osMessageQueueGet(UART_QueueHandle, &msg_struct.size, NULL, 10)==osOK)
 					{
-							count_data += data_from_queue_big[i]*(pow(16, 2*(3-i)));
-					}
-					else{uart_flag = 1;}
-
-				}
-				if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[4], NULL, 10)==osOK)
-				{
-					uint8_t checksum = calculate_checksum(data_from_queue_big, 4, 'c');
-					if(checksum != data_from_queue_big[4])
-					{
-						uart_flag = 1;
-					}
-				}
-				if(uart_flag == 0){
-					if(osMutexAcquire(countMutexHandle, 10)==osOK)
-					{
-
-						count = (uint32_t) count_data;
-						if (count == 0){count = 100;}
-						//else if(count >= 5001){count = 5000;}
-
-						osMutexRelease(countMutexHandle);
-					}
-				}
-				else{uart_flag = 0;}
-			}
-			else if (data_from_queue == 'm')
-			{
-				if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[0], NULL, 10)==osOK)
-				{if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[1], NULL, 10)==osOK){
-					if(osMutexAcquire(modeMutexHandle, 100)==osOK)
-					{
-						uint8_t checksumm = calculate_checksum(data_from_queue_big, 1, 'm');
-						if (checksumm == data_from_queue_big[1])
+						for (uint8_t bg = 0; bg < msg_struct.size; bg++)
 						{
-							if (data_from_queue_big[0] == 0 || data_from_queue_big[0] == 1 || data_from_queue_big[0] == 2)
-								{mode = (int)data_from_queue_big[0];}
-							osMutexRelease(modeMutexHandle);
+							osMessageQueueGet(UART_QueueHandle, &msg_struct.payload[bg], NULL, 10);
+						}
+						osMessageQueueGet(UART_QueueHandle, &msg_struct.checksum, NULL, 10);
+						if (msg_struct.checksum == calculate_checksum(&msg_struct.payload, (size_t)msg_struct.size))
+						{
+							switch (msg_struct.payload[0])
+							{
+							case MODE_0:
+
+								if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+								{
+									mode = 0;
+									osMutexRelease(modeMutexHandle);
+								}
+								break;
+
+							case MODE_1:
+								if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+								{
+									mode = 1;
+									osMutexRelease(modeMutexHandle);
+								}
+								break;
+
+							case MODE_2:
+								if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+								{
+									mode = 2;
+									osMutexRelease(modeMutexHandle);
+								}
+								break;
+
+							case QUERY_COUNT:
+								if(osMutexAcquire(countMutexHandle, 100)==osOK)
+								{
+									uint8_t count_bytes[4];
+									count_bytes[0] = (count >> 24) & 0xFF;
+									count_bytes[1] = (count >> 16) & 0xFF;
+									count_bytes[2] = (count >> 8) & 0xFF;
+									count_bytes[3] = count & 0xFF;
+									osDelay(30);
+									HAL_UART_Transmit_IT(&huart3, count_bytes, 4);
+									osMutexRelease(countMutexHandle);
+								}
+								break;
+
+							case QUERY_MODE:
+								if(osMutexAcquire(modeMutexHandle, 100)==osOK)
+								{
+									uint8_t mode_placeholder = (uint8_t) mode;
+									osDelay(30);
+									HAL_UART_Transmit_IT(&huart3, &mode_placeholder, 1);
+									osMutexRelease(modeMutexHandle);
+								}
+								break;
+
+							case COUNT_X:
+								P_count = 0;
+								for (uint8_t k = 1; k < 5; k++)
+								{
+									P_count += ((msg_struct.payload[k])*pow(16, 2*(4-k)));
+								}
+								if(osMutexAcquire(countMutexHandle, 30)==osOK)
+								{
+									count = P_count;
+									osMutexRelease(countMutexHandle);
+								}
+								break;
+							default:
+								break;
+							}
 						}
 					}
 				}
-			}}
-			else if (data_from_queue == 'q')
-			{
-				//Query instruction received, next byte must be 'c' or 'm' and it must send
-
-				if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[0], NULL, 10)==osOK)
-				{
-
-					if(osMessageQueueGet(UART_QueueHandle, &data_from_queue_big[1], NULL, 10)==osOK){
-					uint8_t checksumq = calculate_checksum(data_from_queue_big, 1, 'q');
-					if(checksumq == data_from_queue_big[1]){
-					if (data_from_queue_big[0] == 'c'){
-						if(osMutexAcquire(countMutexHandle, 10)==osOK){
-						// Extract bytes (MSB first, network order)
-							tx_bytes[0] = (count >> 24) & 0xFF;  // Most significant byte
-							tx_bytes[1] = (count >> 16) & 0xFF;
-							tx_bytes[2] = (count >> 8)  & 0xFF;
-							tx_bytes[3] = count & 0xFF;          // Least significant byte
-						osMutexRelease(countMutexHandle);}
-						HAL_UART_Transmit_IT(&huart3, tx_bytes, 4);
-						/*HAL_StatusTypeDef debug_status_uart_t = HAL_UART_Transmit_IT(&huart3, tx_bytes, 4);
-						if(debug_status_uart_t!=HAL_OK)
-						{	osDelay(50);
-							HAL_UART_Transmit_IT(&huart3, tx_bytes, 4);
-							debug_queue_counter2++;}
-					*/}
-					else if (data_from_queue_big[0] == 'm')
-					{
-
-						if(osMutexAcquire(modeMutexHandle, 10) == osOK){
-						tx_byte = (uint8_t) mode;
-						osMutexRelease(modeMutexHandle);}
-
-						HAL_UART_Transmit_IT(&huart3, &tx_byte, 1);
-					}}}
-				}
 			}
-		osDelay(2);
 		}
-	}}
+		osDelay(2);
+	}
 }
+
+
 
 void Task_2_Flash(void * arguments)
 {
@@ -778,14 +786,12 @@ void Button_ISR_func_m(void)
 	osMutexRelease(modeMutexHandle);
 }
 
-uint8_t calculate_checksum(const uint8_t *data, size_t length, char uart_type) {
+uint8_t calculate_checksum(const uint8_t *data, size_t length) {
     uint8_t checksum = 0;
     for(size_t i = 0; i < length; i++) {
         checksum ^= data[i];
     }
-    if(uart_type == 'c'){checksum ^= 'c';}
-    else if(uart_type == 'm'){checksum ^= 'm';}
-    else if(uart_type == 'q'){checksum ^= 'q';}
+    checksum ^= (uint8_t)length;
     return checksum;
 }
 
