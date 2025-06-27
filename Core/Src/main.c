@@ -27,13 +27,23 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+/*
 typedef struct {
 	uint8_t size;
 	uint8_t payload[5];
+	uint8_t checksum;
+} UART_Message_t;
+*/
+
+typedef struct {
+	uint8_t size;
+	uint8_t instruction;
+	uint8_t payload[4];
 	uint8_t checksum;
 } UART_Message_t;
 
@@ -165,7 +175,7 @@ uint8_t count_nonzero_from_end(const uint8_t *data);
 void Button_ISR_func_c(void);
 void Button_ISR_func_m(void);
 void UART_Send(char *data, uint8_t size);
-uint8_t calculate_checksum(const uint8_t *data, size_t length);
+uint8_t calculate_checksum(const uint8_t *data, size_t length, uint8_t instruction);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -266,7 +276,7 @@ int main(void)
 
   /* Create the queue(s) */
   /* creation of UART_Queue */
-  UART_QueueHandle = osMessageQueueNew (70, sizeof(uint8_t), &UART_Queue_attributes);
+  UART_QueueHandle = osMessageQueueNew (100, sizeof(uint8_t), &UART_Queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -570,7 +580,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+/*
 void Task_1_UART(void * arguments)
 {
 	uint8_t check_start_byte = 0;
@@ -670,8 +680,170 @@ void Task_1_UART(void * arguments)
 		osDelay(2);
 	}
 }
+*/
 
+void Task_1_UART(void * arguments)
+{
+	bool F_start = 0;
+	bool F_size = 0;
+	bool F_instruction = 0;
+	bool F_payload = 0;
+	bool F_checksum = 0;
+	uint8_t Q_get = 0;
+	UART_Message_t msg = {0};
+	uint8_t counting_var = 0;
 
+	for(;;)
+	{	Q_get = 0;
+		if(HAL_UART_GetState(&huart3) != HAL_UART_STATE_BUSY_TX){
+			if(osMessageQueueGet(UART_QueueHandle, &Q_get, NULL, 30)==osOK) //Get byte from queue and put into Q_get
+			{	//Checking start byte = 0xAA, F_start set if so
+				if(F_start)
+				{	//Checking accurate size byte = 1 or 5, F_size set if so
+					if(F_size)
+					{
+						if(F_instruction)
+						{
+							if(msg.size == 1)
+							{
+								F_payload = true;
+							}
+							counting_var ++;
+							if(counting_var == msg.size)
+							{
+								F_payload = true;
+							}
+							if(F_payload)
+							{
+								counting_var = 0;
+								if(Q_get == calculate_checksum(&msg.payload[0], msg.size, msg.instruction))
+								{
+									switch (msg.instruction)
+									{
+									case MODE_0:
+
+										if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+										{
+											mode = 0;
+											osMutexRelease(modeMutexHandle);
+										}
+										break;
+
+									case MODE_1:
+										if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+										{
+											mode = 1;
+											osMutexRelease(modeMutexHandle);
+										}
+										break;
+
+									case MODE_2:
+										if(osMutexAcquire(modeMutexHandle, 20)==osOK)
+										{
+											mode = 2;
+											osMutexRelease(modeMutexHandle);
+										}
+										break;
+
+									case QUERY_COUNT:
+										if(osMutexAcquire(countMutexHandle, 100)==osOK)
+										{
+											uint8_t count_bytes[4];
+											count_bytes[0] = (count >> 24) & 0xFF;
+											count_bytes[1] = (count >> 16) & 0xFF;
+											count_bytes[2] = (count >> 8) & 0xFF;
+											count_bytes[3] = count & 0xFF;
+											osDelay(30);
+											HAL_UART_Transmit_IT(&huart3, count_bytes, 4);
+											osMutexRelease(countMutexHandle);
+										}
+										break;
+
+									case QUERY_MODE:
+										if(osMutexAcquire(modeMutexHandle, 100)==osOK)
+										{
+											uint8_t mode_placeholder = (uint8_t) mode;
+											osDelay(30);
+											HAL_UART_Transmit_IT(&huart3, &mode_placeholder, 1);
+											osMutexRelease(modeMutexHandle);
+										}
+										break;
+
+									case COUNT_X:
+										uint32_t P_count = 0;
+										for (uint8_t k = 0; k < 4; k++)
+										{
+											P_count += ((msg.payload[k])*pow(16, 2*(3-k)));
+										}
+										if(osMutexAcquire(countMutexHandle, 30)==osOK)
+										{
+											count = P_count;
+											osMutexRelease(countMutexHandle);
+										}
+										break;
+									default:
+										break;
+									}
+								}
+								else //Checksum failed, reset initialization and send "checksum failed"
+								{
+									char fail[16] = "Checksum Failed";
+									osDelay(30);
+									HAL_UART_Transmit_IT(&huart3, &fail, strlen(fail));
+								}
+								F_checksum = false;
+								F_instruction = false;
+								F_payload = false;
+								F_size = false;
+								F_start = false;
+								memset(&msg, 0, sizeof(msg));
+							}
+							else
+							{
+								msg.payload[counting_var - 1] = Q_get;
+							}
+						}
+						else if(Q_get < COUNT_X || Q_get >= MODE_0)
+						{
+							msg.instruction = Q_get;
+							F_instruction = true;
+						}
+						else
+						{
+							F_start = false;
+							F_size = false;
+							memset(&msg, 0, sizeof(msg));
+						}
+					}
+					else if(Q_get == 1 || Q_get == 5)
+					{
+						msg.size = Q_get;
+						F_size = true;
+					}
+					else
+					{
+						F_start = false;
+						memset(&msg, 0, sizeof(msg));
+					}
+				}
+				else if(Q_get == 0xAA)
+				{
+					F_start = true;
+				}
+			}
+			else
+			{
+				F_checksum = false;
+				F_instruction = false;
+				F_payload = false;
+				F_size = false;
+				F_start = false;
+				memset(&msg, 0, sizeof(msg));
+			}
+		}
+		osDelay(2);
+	}
+}
 
 void Task_2_Flash(void * arguments)
 {
@@ -786,12 +958,12 @@ void Button_ISR_func_m(void)
 	osMutexRelease(modeMutexHandle);
 }
 
-uint8_t calculate_checksum(const uint8_t *data, size_t length) {
+uint8_t calculate_checksum(const uint8_t *data, size_t length, uint8_t instruction) {
     uint8_t checksum = 0;
     for(size_t i = 0; i < length; i++) {
         checksum ^= data[i];
     }
-    checksum ^= (uint8_t)length;
+    checksum ^= (uint8_t)length ^ instruction;
     return checksum;
 }
 
